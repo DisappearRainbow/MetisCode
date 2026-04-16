@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(python:*)",
+      "Bash(xargs ls *)",
+      "Bash(wc -l /c/Users/18742/Desktop/welcome-claude/metiscode-v2/opencode/packages/opencode/src/*/*.ts)",
+      "Bash(cat)",
+      "Read(//tmp/**)",
+      "Bash(grep \"\\\\.ts$\")",
+      "Bash(awk '{print $NF}')",
+      "Bash(echo \"exit: $?\")"
+    ]
+  }
+}
