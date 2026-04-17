@@ -91,6 +91,50 @@ def test_deepseek_maps_reasoning_content_to_reasoning_delta() -> None:
     assert "text_delta" in event_types
 
 
+def test_deepseek_normalizes_tool_call_fragments() -> None:
+    async def deepseek_streamer(_model, _messages, _tools, _system):  # type: ignore[no-untyped-def]
+        async def gen():  # type: ignore[no-untyped-def]
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "function": {
+                                        "name": "write",
+                                        "arguments": '{"file_path":"a.py"',
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+            yield {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "function": {"arguments": ',"content":"print(1)"}'}},
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            }
+
+        return gen()
+
+    service = LLMService(deepseek_streamer=deepseek_streamer)
+    events = asyncio.run(_collect(service, "deepseek:deepseek-chat"))
+    event_types = [event.type for event in events]  # type: ignore[attr-defined]
+    assert "tool_call_start" in event_types
+    assert "tool_call_delta" in event_types
+    assert "tool_call_end" in event_types
+
+
 def test_merge_partial_json_handles_fragmented_arguments() -> None:
     merged = merge_partial_json(['{"x":', '1,', '"y":"z"}'])
     assert merged == {"x": 1, "y": "z"}

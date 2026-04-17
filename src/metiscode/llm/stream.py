@@ -299,6 +299,9 @@ class LLMService:
 
         text_started = False
         reasoning_started = False
+        tool_ids: dict[int, str] = {}
+        tool_names: dict[int, str] = {}
+        tool_args: dict[int, str] = {}
         async for chunk in raw_stream:
             choices = chunk.get("choices")
             if not isinstance(choices, list) or not choices:
@@ -323,6 +326,46 @@ class LLMService:
                     text_started = True
                     yield TextStart()
                 yield TextDelta(content=content)
+
+            tool_calls = delta.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for item in tool_calls:
+                    if not isinstance(item, dict):
+                        continue
+                    index = item.get("index")
+                    function = item.get("function")
+                    tool_id = item.get("id")
+                    if not isinstance(index, int) or not isinstance(function, dict):
+                        continue
+
+                    if isinstance(tool_id, str):
+                        tool_ids[index] = tool_id
+                    call_id = tool_ids.get(index, f"tool_{index}")
+
+                    name = function.get("name")
+                    if isinstance(name, str):
+                        tool_names[index] = name
+                        if index not in tool_args:
+                            tool_args[index] = ""
+                            yield ToolCallStart(tool_id=call_id, name=name)
+
+                    arguments = function.get("arguments")
+                    if isinstance(arguments, str):
+                        if index not in tool_args:
+                            tool_args[index] = ""
+                            yield ToolCallStart(tool_id=call_id, name=tool_names.get(index, "tool"))
+                        tool_args[index] += arguments
+                        yield ToolCallDelta(tool_id=call_id, content=arguments)
+
+            finish_reason = first.get("finish_reason")
+            if finish_reason == "tool_calls":
+                for index, value in tool_args.items():
+                    call_id = tool_ids.get(index, f"tool_{index}")
+                    yield ToolCallEnd(
+                        tool_id=call_id,
+                        name=tool_names.get(index, "tool"),
+                        input_json=value,
+                    )
 
 
 def merge_partial_json(parts: list[str]) -> dict[str, object]:

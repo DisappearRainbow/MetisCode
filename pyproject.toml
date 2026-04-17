@@ -9,6 +9,7 @@ description = "Python port of OpenCode core agent loop"
 readme = "PLAN.md"
 requires-python = ">=3.12"
 dependencies = [
+  "click>=8.1.0",
   "pydantic>=2.7.0",
   "structlog>=24.0.0",
 ]

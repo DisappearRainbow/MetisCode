@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 import click
+from pydantic import BaseModel, ConfigDict
 
 from metiscode.agent import AgentService
 from metiscode.llm import LLMService
@@ -29,6 +30,42 @@ from metiscode.tool import (
 )
 from metiscode.util.ids import ulid_str
 
+
+class AssistantTurnStats(BaseModel):
+    """Structured summary of assistant parts for one CLI turn."""
+
+    model_config = ConfigDict(extra="forbid")
+    has_text: bool = False
+    has_tool: bool = False
+    has_completed_tool: bool = False
+    claims_file_action: bool = False
+
+
+_FILE_ACTION_HINTS = (
+    "创建",
+    "修改",
+    "编辑",
+    "写入",
+    "删除",
+    "create",
+    "created",
+    "modify",
+    "modified",
+    "edit",
+    "edited",
+    "write",
+    "wrote",
+    "delete",
+    "deleted",
+    "file",
+    ".py",
+    ".ts",
+    ".js",
+    ".md",
+    ".json",
+    ".yaml",
+    ".yml",
+)
 
 def _db() -> SessionDB:
     return SessionDB(project_id="global")
@@ -127,7 +164,13 @@ async def _conversation_messages(db: SessionDB, session_id: str) -> list[dict[st
     return result
 
 
-def _echo_assistant_parts(parts: list[dict[str, object]]) -> None:
+def _contains_file_action_hint(text: str) -> bool:
+    lowered = text.lower()
+    return any(hint in lowered for hint in _FILE_ACTION_HINTS)
+
+
+def _echo_assistant_parts(parts: list[dict[str, object]]) -> AssistantTurnStats:
+    stats = AssistantTurnStats()
     for part in parts:
         data = part.get("data")
         if not isinstance(data, dict):
@@ -136,11 +179,17 @@ def _echo_assistant_parts(parts: list[dict[str, object]]) -> None:
         if part_type == "text":
             content = data.get("content")
             if isinstance(content, str) and content.strip():
+                stats.has_text = True
+                if _contains_file_action_hint(content):
+                    stats.claims_file_action = True
                 click.echo(content)
         elif part_type == "tool":
+            stats.has_tool = True
             tool_id = data.get("tool_id")
             state = data.get("state")
             output = data.get("output")
+            if state == "completed":
+                stats.has_completed_tool = True
             if isinstance(tool_id, str) and isinstance(state, str):
                 click.echo(f"[tool:{state}] {tool_id}")
             if isinstance(output, str) and output.strip():
@@ -149,6 +198,28 @@ def _echo_assistant_parts(parts: list[dict[str, object]]) -> None:
             content = data.get("content")
             if isinstance(content, str) and content.strip():
                 click.echo(f"[reasoning] {content}")
+    return stats
+
+
+def _should_fail_claimed_file_action(
+    *,
+    stats: AssistantTurnStats,
+    has_any_completed_tool: bool,
+) -> bool:
+    return stats.claims_file_action and not stats.has_completed_tool and not has_any_completed_tool
+
+
+def _should_warn_requested_file_action(
+    *,
+    prompt_requests_file_action: bool,
+    stats: AssistantTurnStats,
+    has_any_completed_tool: bool,
+) -> bool:
+    return (
+        prompt_requests_file_action
+        and not stats.has_completed_tool
+        and not has_any_completed_tool
+    )
 
 
 async def _ensure_session(
@@ -193,9 +264,11 @@ async def _run_prompt(model: str, agent: str, session_id: str | None, prompt: st
     db = _db()
     resolved_session_id = await _ensure_session(db, maybe_session_id=session_id, prompt=prompt)
     await _append_user_message(db, session_id=resolved_session_id, prompt=prompt)
+    prompt_requests_file_action = _contains_file_action_hint(prompt)
 
     click.echo(f"session_id={resolved_session_id}")
     max_steps = max(1, agent_info.max_steps)
+    has_any_completed_tool = False
 
     for _ in range(max_steps):
         assistant_message_id = ulid_str()
@@ -226,7 +299,26 @@ async def _run_prompt(model: str, agent: str, session_id: str | None, prompt: st
                 system=f"Agent: {agent}",
             )
         )
-        _echo_assistant_parts(await db.get_message_parts(assistant_message_id))
+        stats = _echo_assistant_parts(await db.get_message_parts(assistant_message_id))
+        has_any_completed_tool = has_any_completed_tool or stats.has_completed_tool
+        if not stats.has_text and not stats.has_tool:
+            raise click.ClickException(
+                "assistant returned empty output (no text/tool). "
+                "Check provider API key or provider response parsing."
+            )
+        if _should_fail_claimed_file_action(
+            stats=stats,
+            has_any_completed_tool=has_any_completed_tool,
+        ):
+            raise click.ClickException(
+                "assistant claimed file operations, but no completed tool call was recorded."
+            )
+        if _should_warn_requested_file_action(
+            prompt_requests_file_action=prompt_requests_file_action,
+            stats=stats,
+            has_any_completed_tool=has_any_completed_tool,
+        ):
+            click.echo("[warn] requested file action, but no completed tool call was recorded.")
         if result == "stop":
             return resolved_session_id
         if result == "compact":

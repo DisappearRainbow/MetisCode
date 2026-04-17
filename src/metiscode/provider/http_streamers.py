@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
 from collections.abc import AsyncIterable, AsyncIterator
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -25,6 +27,19 @@ def _stringify_content(content: object) -> str:
                     segments.append(text)
         return "".join(segments)
     return ""
+
+
+def _debug_dump_response(
+    provider_id: str,
+    payload: dict[str, object],
+    response: dict[str, object],
+) -> None:
+    if os.getenv("METISCODE_DEBUG_PROVIDER_JSON", "").lower() not in {"1", "true", "yes"}:
+        return
+    payload_text = json.dumps(payload, ensure_ascii=False)[:3000]
+    response_text = json.dumps(response, ensure_ascii=False)[:3000]
+    sys.stderr.write(f"[provider-debug] provider={provider_id} payload={payload_text}\n")
+    sys.stderr.write(f"[provider-debug] provider={provider_id} response={response_text}\n")
 
 
 class HTTPStreamers:
@@ -104,6 +119,7 @@ class HTTPStreamers:
             },
             payload=payload,
         )
+        _debug_dump_response(model_ref.provider_id, payload, response)
 
         choices = response.get("choices")
         if not isinstance(choices, list) or not choices:
@@ -202,6 +218,7 @@ class HTTPStreamers:
             },
             payload=payload,
         )
+        _debug_dump_response(model_ref.provider_id, payload, response)
 
         content_blocks = response.get("content")
         if not isinstance(content_blocks, list):
