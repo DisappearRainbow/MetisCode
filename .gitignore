@@ -1,4 +1,7 @@
 .tmp/
+.tmp_*/
+.metiscode/tmp/
+pytest-cache-files-*/
 __pycache__/
 .pytest_cache/
 .mypy_cache/

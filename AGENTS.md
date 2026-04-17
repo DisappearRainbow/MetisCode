@@ -207,11 +207,11 @@ Keep this table current. When starting a phase, mark it `in_progress`; when all 
 
 | Phase | Scope | Slices | Status | Current Slice |
 | --- | --- | --- | --- | --- |
-| 1 | scaffold, util, config, project, permission, provider | P1-S01~S09 | todo | — |
-| 2 | db, message, bus, tool registry, all tools, agent, llm, processor, prompt, compaction | P2-S01~S31 | todo | — |
-| 3 | CLI, FastAPI server, MCP client | P3-S01~S04 | todo | — |
-| 4 | Textual TUI (prompt input, message list, tool/diff render, permission dialog, session picker, themes, keybindings) | P4-S01~S05 | todo | — |
-| 5 | Skills (JSON), integration tests, polish | P5-S01~S03 | todo | — |
+| 1 | scaffold, util, config, project, permission, provider | P1-S01~S09 | done | — |
+| 2 | db, message, bus, tool registry, all tools, agent, llm, processor, prompt, compaction | P2-S01~S31 | done | — |
+| 3 | CLI, FastAPI server, MCP client | P3-S01~S04 | done | — |
+| 4 | Textual TUI (prompt input, message list, tool/diff render, permission dialog, session picker, themes, keybindings) | P4-S01~S05 | done | — |
+| 5 | Skills (JSON), integration tests, polish | P5-S01~S03 | done | — |
 
 Detailed slice plans with per-slice test plans: see `plans/` directory.
 

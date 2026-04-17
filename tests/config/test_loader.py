@@ -1,5 +1,4 @@
 import shutil
-import tempfile
 from pathlib import Path
 
 from metiscode.config.loader import (
@@ -8,6 +7,7 @@ from metiscode.config.loader import (
     parse_config_text,
 )
 from metiscode.config.schema import ConfigInfo
+from metiscode.util.ids import ulid_str
 
 
 def test_parse_jsonc_with_comments_and_trailing_commas() -> None:
@@ -37,7 +37,10 @@ def test_merge_config_concat_arrays_deduplicates_in_order() -> None:
 
 
 def test_load_config_hierarchy_precedence() -> None:
-    tmp_dir = Path(tempfile.mkdtemp(prefix="metiscode-config-", dir=".tmp"))
+    base = Path(".").resolve() / ".metiscode" / "tmp"
+    base.mkdir(parents=True, exist_ok=True)
+    tmp_dir = base / f"metiscode-config-{ulid_str().lower()}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
     global_file = tmp_dir / "global.jsonc"
     project_file = tmp_dir / "project.jsonc"
 
