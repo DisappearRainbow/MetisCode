@@ -16,7 +16,20 @@ def test_cli_help_contains_expected_commands() -> None:
     assert "tui" in result.output
 
 
-def test_cli_run_parses_model_option() -> None:
+def test_cli_run_parses_model_option(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    async def fake_run_prompt(  # type: ignore[no-untyped-def]
+        model: str,
+        agent: str,
+        session_id: str | None,
+        prompt: str,
+    ) -> str:
+        assert model == "anthropic:claude-sonnet-4-20250514"
+        assert agent == "build"
+        assert session_id is None
+        assert prompt == "hello"
+        return "sess_test"
+
+    monkeypatch.setattr(cli_module, "_run_prompt", fake_run_prompt)
     runner = CliRunner()
     result = runner.invoke(
         cli_module.cli,

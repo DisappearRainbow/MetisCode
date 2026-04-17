@@ -167,7 +167,7 @@ class SessionProcessor:
             abort=self.abort,
             metadata=lambda _payload: None,
             ask=self._ask_passthrough,
-            extra={"directory": "."},
+            extra={"directory": ".", "worktree": ".", "db": self.db},
         )
         try:
             result = await instance.execute(params, ctx)

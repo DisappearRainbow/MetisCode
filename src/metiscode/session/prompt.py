@@ -42,45 +42,67 @@ def to_model_messages(
         if not isinstance(parts_raw, list):
             parts_raw = []
         parts = [parse_part(part) for part in parts_raw if isinstance(part, dict)]
+        completed_tools: list[ToolPart] = []
+        for part in parts:
+            if part.type != "tool":
+                continue
+            tool_part = ToolPart.model_validate(part.model_dump())
+            if tool_part.state == "completed":
+                completed_tools.append(tool_part)
 
         if provider == "anthropic":
             content: list[dict[str, object]] = []
             for part in parts:
                 if part.type == "text":
                     content.append({"type": "text", "text": part.content})
-                elif part.type == "tool":
-                    tool_part = ToolPart.model_validate(part.model_dump())
-                    if tool_part.state == "completed":
-                        content.append(
-                            {
-                                "type": "tool_use",
-                                "id": tool_part.tool_id,
-                                "name": tool_part.tool_id,
-                                "input": tool_part.input,
-                            }
-                        )
+            for tool_part in completed_tools:
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": tool_part.tool_id,
+                        "name": tool_part.tool_id,
+                        "input": tool_part.input,
+                    }
+                )
             result.append({"role": role, "content": content})
+            if role == "assistant":
+                for tool_part in completed_tools:
+                    result.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_part.tool_id,
+                                    "content": tool_part.output or "",
+                                }
+                            ],
+                        }
+                    )
             continue
 
         content_text = "\n".join(part.content for part in parts if part.type == "text")
-        tool_calls = []
-        for part in parts:
-            if part.type != "tool":
-                continue
-            tool_part = ToolPart.model_validate(part.model_dump())
-            if tool_part.state != "completed":
-                continue
-            tool_calls.append(
+        if role == "assistant" and completed_tools:
+            tool_calls = [
                 {
                     "id": tool_part.tool_id,
                     "type": "function",
                     "function": {"name": tool_part.tool_id, "arguments": str(tool_part.input)},
                 }
-            )
-        item: dict[str, object] = {"role": role, "content": content_text}
-        if tool_calls:
-            item["tool_calls"] = tool_calls
-        result.append(item)
+                for tool_part in completed_tools
+            ]
+            result.append({"role": role, "content": content_text, "tool_calls": tool_calls})
+            for tool_part in completed_tools:
+                result.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_part.tool_id,
+                        "content": tool_part.output or "",
+                    }
+                )
+            continue
+
+        result.append({"role": role, "content": content_text})
     return result
 
 

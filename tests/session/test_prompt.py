@@ -61,6 +61,8 @@ def test_to_model_messages_maps_completed_tool_part_for_openai() -> None:
     ]
     converted = to_model_messages(messages, provider="openai")
     assert "tool_calls" in converted[0]
+    assert converted[1]["role"] == "tool"
+    assert converted[1]["tool_call_id"] == "write"
 
 
 def test_session_prompt_loops_until_stop() -> None:
