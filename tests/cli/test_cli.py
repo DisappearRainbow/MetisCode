@@ -125,6 +125,7 @@ def test_should_fail_claimed_file_action_only_before_any_success() -> None:
         has_text=True,
         has_tool=False,
         has_completed_tool=False,
+        schema_claims_file_action=True,
         claims_file_action=True,
     )
     assert (
@@ -453,3 +454,79 @@ def test_build_permission_ask_blocks_deny_rule() -> None:
         assert "Permission denied: edit:hello.py" in str(error)
     else:
         raise AssertionError("expected PermissionDeniedError")
+
+
+def test_extract_assistant_status_strips_marker_and_parses_schema() -> None:
+    text = 'answer body\nMETISCODE_STATUS: {"file_action":"planned"}'
+    sanitized, status = cli_module._extract_assistant_status(text)
+    assert sanitized == "answer body"
+    assert status is not None
+    assert status.file_action == "planned"
+
+
+def test_should_fail_claimed_file_action_uses_schema_claim_only() -> None:
+    legacy_keyword_claim = cli_module.AssistantTurnStats(
+        has_text=True,
+        claims_file_action=True,
+        schema_claims_file_action=False,
+    )
+    schema_claim = cli_module.AssistantTurnStats(
+        has_text=True,
+        claims_file_action=True,
+        schema_claims_file_action=True,
+    )
+    assert (
+        cli_module._should_fail_claimed_file_action(
+            stats=legacy_keyword_claim,
+            has_any_completed_tool=False,
+        )
+        is False
+    )
+    assert (
+        cli_module._should_fail_claimed_file_action(
+            stats=schema_claim,
+            has_any_completed_tool=False,
+        )
+        is True
+    )
+
+
+def test_should_warn_requested_file_action_suppressed_by_tool_error() -> None:
+    no_tool_with_error = cli_module.AssistantTurnStats(
+        has_text=True,
+        has_tool=True,
+        has_completed_tool=False,
+        has_error_tool=True,
+    )
+    assert (
+        cli_module._should_warn_requested_file_action(
+            prompt_requests_file_action=True,
+            stats=no_tool_with_error,
+            has_any_completed_tool=False,
+            has_any_error_tool=False,
+        )
+        is False
+    )
+
+
+def test_build_turn_system_prompt_contains_status_schema() -> None:
+    system_prompt = cli_module._build_turn_system_prompt("build")
+    assert system_prompt.startswith("Agent: build")
+    assert "METISCODE_STATUS" in system_prompt
+
+
+def test_echo_assistant_parts_extracts_permission_denied_error() -> None:
+    parts = [
+        {
+            "data": {
+                "type": "tool",
+                "tool_id": "write",
+                "state": "error",
+                "error": "Permission denied: edit:hello.py (matched deny rule)",
+            }
+        }
+    ]
+    stats = cli_module._echo_assistant_parts(parts)
+    assert stats.has_tool is True
+    assert stats.has_error_tool is True
+    assert stats.permission_denied_error is not None

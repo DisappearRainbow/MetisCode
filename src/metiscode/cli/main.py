@@ -11,7 +11,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
@@ -54,7 +54,17 @@ class AssistantTurnStats(BaseModel):
     has_text: bool = False
     has_tool: bool = False
     has_completed_tool: bool = False
+    has_error_tool: bool = False
+    permission_denied_error: str | None = None
+    schema_claims_file_action: bool = False
     claims_file_action: bool = False
+
+
+class AssistantStatus(BaseModel):
+    """Schema-constrained assistant status marker embedded in text output."""
+
+    model_config = ConfigDict(extra="forbid")
+    file_action: Literal["none", "planned", "attempted", "completed"]
 
 
 _FILE_ACTION_HINTS = (
@@ -81,6 +91,13 @@ _FILE_ACTION_HINTS = (
     ".json",
     ".yaml",
     ".yml",
+)
+_STATUS_PREFIX = "METISCODE_STATUS:"
+_STATUS_SCHEMA_INSTRUCTION = (
+    "At the end of your final response, append one line exactly in this schema: "
+    'METISCODE_STATUS: {"file_action":"none|planned|attempted|completed"}. '
+    "Use planned for suggestions/plans, attempted for failed file-action attempts, "
+    "completed only after successful file changes."
 )
 
 
@@ -226,6 +243,34 @@ def _contains_file_action_hint(text: str) -> bool:
     return any(hint in lowered for hint in _FILE_ACTION_HINTS)
 
 
+def _extract_assistant_status(content: str) -> tuple[str, AssistantStatus | None]:
+    lines = content.splitlines()
+    marker_index: int | None = None
+    marker_payload = ""
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index].strip()
+        if not line.startswith(_STATUS_PREFIX):
+            continue
+        marker_index = index
+        marker_payload = line[len(_STATUS_PREFIX) :].strip()
+        break
+    if marker_index is None:
+        return content, None
+
+    status: AssistantStatus | None = None
+    if marker_payload:
+        try:
+            parsed = json.loads(marker_payload)
+            if isinstance(parsed, dict):
+                status = AssistantStatus.model_validate(parsed)
+        except Exception:  # noqa: BLE001
+            status = None
+
+    lines_without_marker = [line for idx, line in enumerate(lines) if idx != marker_index]
+    sanitized = "\n".join(lines_without_marker).strip()
+    return sanitized, status
+
+
 def _echo_assistant_parts(parts: list[dict[str, object]]) -> AssistantTurnStats:
     stats = AssistantTurnStats()
     for part in parts:
@@ -237,20 +282,32 @@ def _echo_assistant_parts(parts: list[dict[str, object]]) -> AssistantTurnStats:
             content = data.get("content")
             if isinstance(content, str) and content.strip():
                 stats.has_text = True
-                if _contains_file_action_hint(content):
+                sanitized, status = _extract_assistant_status(content)
+                if status is not None and status.file_action == "completed":
+                    stats.schema_claims_file_action = True
                     stats.claims_file_action = True
-                click.echo(content)
+                elif status is None and _contains_file_action_hint(content):
+                    stats.claims_file_action = True
+                if sanitized:
+                    click.echo(sanitized)
         elif part_type == "tool":
             stats.has_tool = True
             tool_id = data.get("tool_id")
             state = data.get("state")
             output = data.get("output")
+            error = data.get("error")
             if state == "completed":
                 stats.has_completed_tool = True
+            if state == "error":
+                stats.has_error_tool = True
             if isinstance(tool_id, str) and isinstance(state, str):
                 click.echo(f"[tool:{state}] {tool_id}")
             if isinstance(output, str) and output.strip():
                 click.echo(output)
+            if isinstance(error, str) and error.strip():
+                click.echo(error)
+                if error.startswith("Permission denied:") and stats.permission_denied_error is None:
+                    stats.permission_denied_error = error
         elif part_type == "reasoning":
             content = data.get("content")
             if isinstance(content, str) and content.strip():
@@ -263,7 +320,11 @@ def _should_fail_claimed_file_action(
     stats: AssistantTurnStats,
     has_any_completed_tool: bool,
 ) -> bool:
-    return stats.claims_file_action and not stats.has_completed_tool and not has_any_completed_tool
+    return (
+        stats.schema_claims_file_action
+        and not stats.has_completed_tool
+        and not has_any_completed_tool
+    )
 
 
 def _should_warn_requested_file_action(
@@ -271,12 +332,19 @@ def _should_warn_requested_file_action(
     prompt_requests_file_action: bool,
     stats: AssistantTurnStats,
     has_any_completed_tool: bool,
+    has_any_error_tool: bool = False,
 ) -> bool:
     return (
         prompt_requests_file_action
         and not stats.has_completed_tool
         and not has_any_completed_tool
+        and not stats.has_error_tool
+        and not has_any_error_tool
     )
+
+
+def _build_turn_system_prompt(agent: str) -> str:
+    return f"Agent: {agent}\n{_STATUS_SCHEMA_INSTRUCTION}"
 
 
 async def _ensure_session(
@@ -331,6 +399,7 @@ async def _run_prompt(model: str, agent: str, session_id: str | None, prompt: st
     click.echo(f"session_id={resolved_session_id}")
     max_steps = max(1, agent_info.max_steps)
     has_any_completed_tool = False
+    has_any_error_tool = False
     compacted_last_step = False
 
     for _ in range(max_steps):
@@ -360,7 +429,7 @@ async def _run_prompt(model: str, agent: str, session_id: str | None, prompt: st
                 model=model,
                 messages=to_model_messages(messages, provider=model_ref.provider_id),
                 tools=tools,
-                system=f"Agent: {agent}",
+                system=_build_turn_system_prompt(agent),
             )
         )
         if result == "compact":
@@ -377,6 +446,9 @@ async def _run_prompt(model: str, agent: str, session_id: str | None, prompt: st
         compacted_last_step = False
         stats = _echo_assistant_parts(await db.get_message_parts(assistant_message_id))
         has_any_completed_tool = has_any_completed_tool or stats.has_completed_tool
+        has_any_error_tool = has_any_error_tool or stats.has_error_tool
+        if isinstance(stats.permission_denied_error, str):
+            raise click.ClickException(stats.permission_denied_error)
         if not stats.has_text and not stats.has_tool:
             raise click.ClickException(
                 "assistant returned empty output (no text/tool). "
@@ -393,6 +465,7 @@ async def _run_prompt(model: str, agent: str, session_id: str | None, prompt: st
             prompt_requests_file_action=prompt_requests_file_action,
             stats=stats,
             has_any_completed_tool=has_any_completed_tool,
+            has_any_error_tool=has_any_error_tool,
         ):
             click.echo("[warn] requested file action, but no completed tool call was recorded.")
         if result == "stop":

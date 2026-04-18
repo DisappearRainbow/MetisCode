@@ -66,10 +66,8 @@ def test_e2e_cli_permission_block_check10() -> None:
     )
     combined = f"{result.stdout}\n{result.stderr}".lower()
     assert result.returncode != 0 or "[tool:error]" in result.stdout
-    assert (
-        "permission denied: edit:" in combined
-        or "no completed tool call was recorded" in combined
-    )
+    assert "permission denied: edit:" in combined
+    assert "no completed tool call was recorded" not in combined
     assert not denied_file.exists()
 
 
