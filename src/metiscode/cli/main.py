@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
+from typing import cast
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 import click
+import uvicorn
 from pydantic import BaseModel, ConfigDict
 
 from metiscode.agent import AgentService
 from metiscode.llm import LLMService
+from metiscode.permission import ConfigPermission, Rule, evaluate, from_config, merge
 from metiscode.provider import HTTPStreamers, ProviderService
-from metiscode.session import SessionDB, SessionProcessor, StreamInput, to_model_messages
+from metiscode.session import SessionDB, SessionProcessor, StreamInput, prune, to_model_messages
 from metiscode.tool import (
     ToolRegistry,
     create_bash_tool,
@@ -28,6 +40,10 @@ from metiscode.tool import (
     create_websearch_tool,
     create_write_tool,
 )
+from metiscode.tui import MetiscodeApp
+from metiscode.util.dotenv import load_dotenv
+from metiscode.util.encoding import ensure_utf8_stdio
+from metiscode.util.errors import AuthError, PermissionDeniedError
 from metiscode.util.ids import ulid_str
 
 
@@ -66,6 +82,47 @@ _FILE_ACTION_HINTS = (
     ".yaml",
     ".yml",
 )
+
+
+def _load_runtime_permission_rules() -> list[Rule]:
+    raw = os.getenv("METISCODE_PERMISSION_RULES", "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise click.ClickException(f"invalid METISCODE_PERMISSION_RULES JSON: {error}") from error
+    if not isinstance(parsed, Mapping):
+        raise click.ClickException("METISCODE_PERMISSION_RULES must be a JSON object")
+    permission_config = cast(ConfigPermission, parsed)
+    return from_config(permission_config)
+
+
+def _permission_ask_mode() -> str:
+    mode = os.getenv("METISCODE_PERMISSION_ASK", "allow").strip().lower()
+    return "deny" if mode == "deny" else "allow"
+
+
+def _build_permission_ask(
+    rules: list[Rule],
+) -> Callable[[str, list[str]], Awaitable[None]]:
+    ask_mode = _permission_ask_mode()
+
+    async def _ask(permission: str, patterns: list[str]) -> None:
+        candidates = patterns or ["*"]
+        for pattern in candidates:
+            decision = evaluate(permission, pattern, rules)
+            if decision.action == "deny":
+                raise PermissionDeniedError(
+                    f"Permission denied: {permission}:{pattern} (matched deny rule)"
+                )
+            if decision.action == "ask" and ask_mode == "deny":
+                raise PermissionDeniedError(
+                    f"Permission denied: {permission}:{pattern} (ask blocked by runtime policy)"
+                )
+
+    return _ask
+
 
 def _db() -> SessionDB:
     return SessionDB(project_id="global")
@@ -258,7 +315,12 @@ async def _append_user_message(db: SessionDB, *, session_id: str, prompt: str) -
 async def _run_prompt(model: str, agent: str, session_id: str | None, prompt: str) -> str:
     provider_service = ProviderService()
     model_ref = provider_service.parse_model(model)
+    provider_service.require_credentials(model_ref)
+    model_info = provider_service.get_model(model_ref.provider_id, model_ref.model_id)
     agent_info = AgentService().get(agent)
+    runtime_permission_rules = _load_runtime_permission_rules()
+    permission_rules = merge(agent_info.permission, runtime_permission_rules)
+    permission_ask = _build_permission_ask(permission_rules)
     llm = _create_llm_service(provider_service)
     registry = _create_registry()
     db = _db()
@@ -269,6 +331,7 @@ async def _run_prompt(model: str, agent: str, session_id: str | None, prompt: st
     click.echo(f"session_id={resolved_session_id}")
     max_steps = max(1, agent_info.max_steps)
     has_any_completed_tool = False
+    compacted_last_step = False
 
     for _ in range(max_steps):
         assistant_message_id = ulid_str()
@@ -291,6 +354,7 @@ async def _run_prompt(model: str, agent: str, session_id: str | None, prompt: st
             db=db,
             bus=None,
         )
+        processor.permission_ask = permission_ask
         result = await processor.process(
             StreamInput(
                 model=model,
@@ -299,6 +363,18 @@ async def _run_prompt(model: str, agent: str, session_id: str | None, prompt: st
                 system=f"Agent: {agent}",
             )
         )
+        if result == "compact":
+            if compacted_last_step:
+                raise click.ClickException("context overflow persists after compaction")
+            try:
+                await prune(resolved_session_id, model_info, db)
+            except Exception as error:  # noqa: BLE001
+                raise click.ClickException(f"compaction failed: {error}") from error
+            click.echo("[compacted]")
+            compacted_last_step = True
+            continue
+
+        compacted_last_step = False
         stats = _echo_assistant_parts(await db.get_message_parts(assistant_message_id))
         has_any_completed_tool = has_any_completed_tool or stats.has_completed_tool
         if not stats.has_text and not stats.has_tool:
@@ -321,8 +397,6 @@ async def _run_prompt(model: str, agent: str, session_id: str | None, prompt: st
             click.echo("[warn] requested file action, but no completed tool call was recorded.")
         if result == "stop":
             return resolved_session_id
-        if result == "compact":
-            raise click.ClickException("context overflow: compaction not wired in CLI yet")
 
     raise click.ClickException(f"max steps exceeded ({max_steps})")
 
@@ -330,6 +404,8 @@ async def _run_prompt(model: str, agent: str, session_id: str | None, prompt: st
 @click.group()
 def cli() -> None:
     """MetisCode command line interface."""
+    ensure_utf8_stdio()
+    load_dotenv()
 
 
 @cli.command()
@@ -343,15 +419,27 @@ def run(model: str, agent: str, session_id: str | None, prompt: str) -> None:
     click.echo(f"agent={agent}")
     if session_id:
         click.echo(f"session_id={session_id}")
-    asyncio.run(_run_prompt(model=model, agent=agent, session_id=session_id, prompt=prompt))
+    try:
+        asyncio.run(_run_prompt(model=model, agent=agent, session_id=session_id, prompt=prompt))
+    except AuthError as error:
+        raise click.ClickException(str(error)) from error
 
 
 @cli.command()
 @click.option("--port", default=4096, show_default=True, type=int)
 @click.option("--host", default="127.0.0.1", show_default=True)
-def serve(port: int, host: str) -> None:
-    """Start HTTP server placeholder."""
-    click.echo(f"Serving on http://{host}:{port}")
+@click.option("--reload/--no-reload", default=False, show_default=True)
+def serve(port: int, host: str, reload: bool) -> None:
+    """Start HTTP server."""
+    ensure_utf8_stdio()
+    uvicorn.run(
+        "metiscode.server.app:create_app",
+        host=host,
+        port=port,
+        factory=True,
+        log_level="info",
+        reload=reload,
+    )
 
 
 @cli.group()
@@ -405,6 +493,51 @@ def session_delete(session_id: str) -> None:
 
 
 @cli.command()
-def tui() -> None:
-    """Launch TUI placeholder."""
-    click.echo("TUI is not implemented yet.")
+@click.option("--serve/--no-serve", default=True, show_default=True)
+@click.option("--base-url", default=None)
+def tui(serve: bool, base_url: str | None) -> None:
+    """Launch TUI."""
+    ensure_utf8_stdio()
+    server_process: subprocess.Popen[bytes] | None = None
+    resolved_base_url = base_url or "http://127.0.0.1:4096"
+    try:
+        if serve:
+            port = _find_free_port()
+            resolved_base_url = f"http://127.0.0.1:{port}"
+            server_process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "metiscode",
+                    "serve",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+            )
+            _wait_for_server(resolved_base_url)
+        app = MetiscodeApp(base_url=resolved_base_url)
+        app.run()
+    finally:
+        if server_process is not None:
+            server_process.terminate()
+
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_server(base_url: str, timeout_seconds: float = 10.0) -> None:
+    deadline = time.time() + timeout_seconds
+    health_url = f"{base_url.rstrip('/')}/health"
+    while time.time() < deadline:
+        try:
+            with urlrequest.urlopen(health_url, timeout=1.0) as response:
+                if response.status == 200:
+                    return
+        except (urlerror.URLError, TimeoutError):
+            time.sleep(0.1)
+    raise click.ClickException(f"server failed to start: {health_url}")

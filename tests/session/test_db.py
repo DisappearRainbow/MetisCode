@@ -4,7 +4,7 @@ from collections.abc import Awaitable
 from pathlib import Path
 from typing import TypeVar
 
-from metiscode.session.db import SessionDB
+from metiscode.session.db import SessionDB, default_db_path
 
 T = TypeVar("T")
 
@@ -137,3 +137,9 @@ def test_data_json_roundtrip() -> None:
 
     message = _run(db.get_messages("sess_1"))[0]
     assert message["data"] == payload
+
+
+def test_default_db_path_respects_env_override(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    override = Path(".").resolve() / ".metiscode" / "tmp" / "env-db.sqlite3"
+    monkeypatch.setenv("METISCODE_DB_PATH", str(override))
+    assert default_db_path("global") == override.resolve()

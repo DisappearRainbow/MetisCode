@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+from pydantic import BaseModel
+
+from metiscode.bus import (
+    MESSAGE_COMPLETED,
+    PART_CREATED,
+    EventDefinition,
+    MessageCompleted,
+    PartCreated,
+)
 from metiscode.llm import (
     ErrorEvent,
     LLMService,
@@ -34,7 +44,7 @@ class DBProtocol(Protocol):
 
 
 class BusProtocol(Protocol):
-    async def publish(self, event: object, payload: object) -> None: ...
+    async def publish(self, event: EventDefinition, payload: BaseModel) -> None: ...
 
 
 @dataclass(slots=True, frozen=True)
@@ -60,6 +70,7 @@ class SessionProcessor:
     registry: ToolRegistry
     db: DBProtocol | None = None
     bus: BusProtocol | None = None
+    permission_ask: Callable[[str, list[str]], Awaitable[None]] | None = None
     _doom_loop_counter: dict[tuple[str, str], int] = field(default_factory=dict)
 
     @classmethod
@@ -166,7 +177,7 @@ class SessionProcessor:
             agent=self.agent,
             abort=self.abort,
             metadata=lambda _payload: None,
-            ask=self._ask_passthrough,
+            ask=self.permission_ask or self._ask_passthrough,
             extra={"directory": ".", "worktree": ".", "db": self.db},
         )
         try:
@@ -198,9 +209,10 @@ class SessionProcessor:
         return None
 
     async def _create_part(self, part_type: str, data: dict[str, object]) -> None:
+        part_id = ulid_str()
         if self.db is not None and hasattr(self.db, "create_part"):
             await self.db.create_part(
-                part_id=ulid_str(),
+                part_id=part_id,
                 message_id=self.message_id,
                 session_id=self.session_id,
                 part_type=part_type,
@@ -208,17 +220,22 @@ class SessionProcessor:
             )
         if self.bus is not None and hasattr(self.bus, "publish"):
             await self.bus.publish(
-                "part.created",
-                {
-                    "session_id": self.session_id,
-                    "message_id": self.message_id,
-                    "data": data,
-                },
+                PART_CREATED,
+                PartCreated(
+                    session_id=self.session_id,
+                    message_id=self.message_id,
+                    part_id=part_id,
+                    data=data,
+                ),
             )
 
     async def _publish_message_completed(self) -> None:
         if self.bus is not None and hasattr(self.bus, "publish"):
             await self.bus.publish(
-                "message.completed",
-                {"session_id": self.session_id, "message_id": self.message_id},
+                MESSAGE_COMPLETED,
+                MessageCompleted(
+                    session_id=self.session_id,
+                    message_id=self.message_id,
+                    role="assistant",
+                ),
             )

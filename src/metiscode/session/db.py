@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -16,6 +17,9 @@ def _now_ms() -> int:
 
 def default_db_path(project_id: str) -> Path:
     """Get default database path for a project."""
+    env_path = os.getenv("METISCODE_DB_PATH", "").strip()
+    if env_path:
+        return Path(env_path).expanduser().resolve()
     base = Path.home() / ".metiscode" / "data"
     return base / f"{project_id}.db"
 
